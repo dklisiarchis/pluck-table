@@ -1,0 +1,15 @@
+# Binary
+pluck-table
+build/
+
+# SQL files
+*.sql
+*.sql.gz
+*.sql.tmp
+
+# Go
+go.work
+go.work.sum
+
+# OS
+.DS_Store
