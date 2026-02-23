@@ -413,20 +413,25 @@ func workerMultiTable(ctx context.Context, chunks <-chan Chunk, results chan<- m
 	type tablePattern struct {
 		nameBytes    []byte
 		nameBacktick []byte
+		dropPrefix   []byte
+		createPrefix []byte
+		insertPrefix []byte
+		lockPrefix   []byte
 	}
 
 	patterns := make(map[string]tablePattern)
 	for _, tableName := range tableNames {
+		bt := "`" + tableName + "`"
 		patterns[tableName] = tablePattern{
 			nameBytes:    []byte(tableName),
-			nameBacktick: []byte("`" + tableName + "`"),
+			nameBacktick: []byte(bt),
+			dropPrefix:   []byte("DROP TABLE IF EXISTS " + bt),
+			createPrefix: []byte("CREATE TABLE " + bt),
+			insertPrefix: []byte("INSERT INTO " + bt),
+			lockPrefix:   []byte("LOCK TABLES " + bt),
 		}
 	}
 
-	dropPrefix := []byte("DROP TABLE")
-	createPrefix := []byte("CREATE TABLE")
-	insertPrefix := []byte("INSERT INTO")
-	lockBytes := []byte("LOCK TABLES")
 	unlockBytes := []byte("UNLOCK TABLES")
 
 	outputs := make(map[string]*bytes.Buffer)
@@ -472,26 +477,23 @@ func workerMultiTable(ctx context.Context, chunks <-chan Chunk, results chan<- m
 					continue
 				}
 
-				// Check each table
+				// Check each table using exact prefix matching
 				for tableName, pattern := range patterns {
+					// Quick pre-filter: skip lines that don't contain the table name at all
 					if !bytes.Contains(line, pattern.nameBytes) {
 						continue
 					}
 
-					if !bytes.Contains(line, pattern.nameBacktick) {
-						continue
-					}
-
-					if bytes.HasPrefix(line, createPrefix) {
+					if bytes.HasPrefix(line, pattern.createPrefix) {
 						// Multi-line CREATE TABLE: capture this line and enter capture mode
 						outputs[tableName].Write(line)
 						outputs[tableName].WriteByte('\n')
 						tablesFound[tableName].Store(true)
 						inCreateTable = tableName
-					} else if bytes.HasPrefix(line, dropPrefix) ||
-						bytes.HasPrefix(line, insertPrefix) ||
-						bytes.Contains(line, lockBytes) ||
-						bytes.Contains(line, unlockBytes) {
+					} else if bytes.HasPrefix(line, pattern.insertPrefix) ||
+						bytes.HasPrefix(line, pattern.dropPrefix) ||
+						bytes.HasPrefix(line, pattern.lockPrefix) ||
+						bytes.HasPrefix(line, unlockBytes) {
 
 						outputs[tableName].Write(line)
 						outputs[tableName].WriteByte('\n')
