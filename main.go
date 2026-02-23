@@ -358,6 +358,8 @@ func feedChunksFast(ctx context.Context, reader io.Reader, chunks chan<- Chunk, 
 	buffer.Grow(ChunkSize)
 	offset := int64(0)
 
+	inCreateTable := false // Track CREATE TABLE boundaries to avoid splitting across chunks
+
 	for scanner.Scan() {
 		select {
 		case <-ctx.Done():
@@ -370,7 +372,15 @@ func feedChunksFast(ctx context.Context, reader io.Reader, chunks chan<- Chunk, 
 		buffer.Write(line)
 		buffer.WriteByte('\n')
 
-		if buffer.Len() >= ChunkSize {
+		// Track CREATE TABLE boundaries so we never split them across chunks
+		if bytes.HasPrefix(line, []byte("CREATE TABLE")) {
+			inCreateTable = true
+		}
+		if inCreateTable && len(line) > 0 && line[0] == ')' {
+			inCreateTable = false
+		}
+
+		if buffer.Len() >= ChunkSize && !inCreateTable {
 			data := make([]byte, buffer.Len())
 			copy(data, buffer.Bytes())
 
@@ -440,6 +450,7 @@ func workerMultiTable(ctx context.Context, chunks <-chan Chunk, results chan<- m
 
 		data := chunk.data
 		start := 0
+		inCreateTable := "" // tracks which table's CREATE TABLE we're inside
 
 		for i := 0; i < len(data); i++ {
 			if data[i] == '\n' {
@@ -447,6 +458,17 @@ func workerMultiTable(ctx context.Context, chunks <-chan Chunk, results chan<- m
 				start = i + 1
 
 				if len(line) == 0 {
+					continue
+				}
+
+				// If we're inside a CREATE TABLE statement, capture all lines
+				if inCreateTable != "" {
+					outputs[inCreateTable].Write(line)
+					outputs[inCreateTable].WriteByte('\n')
+					// Closing line of CREATE TABLE starts with ')'
+					if line[0] == ')' {
+						inCreateTable = ""
+					}
 					continue
 				}
 
@@ -460,8 +482,13 @@ func workerMultiTable(ctx context.Context, chunks <-chan Chunk, results chan<- m
 						continue
 					}
 
-					if bytes.HasPrefix(line, dropPrefix) ||
-						bytes.HasPrefix(line, createPrefix) ||
+					if bytes.HasPrefix(line, createPrefix) {
+						// Multi-line CREATE TABLE: capture this line and enter capture mode
+						outputs[tableName].Write(line)
+						outputs[tableName].WriteByte('\n')
+						tablesFound[tableName].Store(true)
+						inCreateTable = tableName
+					} else if bytes.HasPrefix(line, dropPrefix) ||
 						bytes.HasPrefix(line, insertPrefix) ||
 						bytes.Contains(line, lockBytes) ||
 						bytes.Contains(line, unlockBytes) {
